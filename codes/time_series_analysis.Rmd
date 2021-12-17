@@ -1,0 +1,396 @@
+---
+title: "DataH195a Project"
+author: Zehao Zhao
+date: August 31, 2021
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+original_stock = read.csv("jiangshan.csv", header = TRUE)
+stock = read.csv("jiangshan.csv", header = TRUE)
+stock$time = c(1:nrow(stock))
+stock$days = c(2,3,4,5,6,7,rep(1:7,129),1,2,3,4)
+library(ggplot2)
+library(dplyr)
+library(astsa)
+library(forecast)
+library(knitr)
+```
+# 1 Introduction and Motivation of the Project
+
+This project will primarily be focus on the relationship between Chinese stock markets, and the relationship with its counterpart in Hong Kong and US stock market. Usually, when a policy being make, or a news on the company has been published, there will be ups and downs on the consumer’s confidence toward one company. However, according to my past observation, groups of stockholders from China mainland, Hong Kong, and the US share different thought process sometimes toward certain news. I want to use data to check the relationship between them. The motivation of doing this project is bacause I started my own investment during covid, and it works out great, my position almost doubled in less than one year, and I want to explore about investments. One of the technique I used is to observe chinese and hong kong company and then make a decision on whether to short or long the investment in its counterpart in the US stock market. I found it can be a potential direction to research and find the relationships for systematical investment.
+
+# 2 Dataset Description and Exploratory Data Analysis
+## 2.1 Dataset Description and Dataset Gathering
+The dataset comes from Tushare API, which is a company that provides API for daily stock market prices. It has provided databases on the stock market around the world. I have already written codes to incorporate the dataset into my code. Once I have provided it with the token number of the stock, it will generate information such as open price, highest price, lowest price, low price, the volume of transaction, etc.
+
+## 2.2 Dataset Pre-processing
+I implemented data pre-processing on python jupyter notebook, please check out my github repository for more information about codes. First, I gather data for one particular Chinese stock Jiangshan Oupai (just an example of my investment) I used the build in function to get the daily trading data, using regex to change the string to timestamp format, and then join with another table that contains the full calendar. The reason of doing so is because not everyday is trading day. The market will close during weekend and holiday. I treat weekend and holiday as no trading, and therefore the price level off. I also add which day of the week from 1-7 and new format of date for drawing in the dataframe.
+
+## 2.3 Exploratory Data Analysis
+```{r, echo = FALSE,fig.show="hold", out.width="50%",fig.cap="Jiangshan Stock Price Over Time",warning=FALSE,message=FALSE,error=FALSE, results='hide'}
+original_stock$new_date <- as.Date("2019-6-19") + 0:912
+stock$new_date <- as.Date("2019-6-19") + 0:912
+ggplot(original_stock, aes(x=new_date, y=open)) +
+  geom_line() + 
+  xlab("Month")+
+  ggtitle("Stock open prices") +
+  theme(plot.title = element_text(face = "bold")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.title = element_text(size  = 17)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(axis.title = element_text(size = 13)) 
+  
+```
+
+We then use the periodogram to explore the frequency of oscillation more in details. From the left panel of Figure 1, we can notice three dominant frequency. The first one is the Three-week frequency that we have already discussed about in the overall trend, The second is the weekly (5 day) frequency, and third one is the 3-week frequency. Moreover, figure 1 shows the effects of different days of the week. Furthermore, it is clear to see that as the mean increases in the time series, the variance also increases, so it is reasonable to use log VST to stabilize the data. From this point, we will be working with log(open) as we proceed with our modelings.
+```{r, echo = FALSE,fig.show="hold", out.width="50%",fig.cap = "The left panel is the periodigram of open prices. The right panel shows the comparison of new price on Saturnday and Monday. The red dots and blue dots are correspond to Saturnday and Monday. respectively"}
+#pgrm
+new_open = stock$open
+n = nrow(stock)
+
+pgrm = abs(fft(new_open)[2:floor(n/2)])^2/n
+plot(pgrm , type ="h", main = "Periodigram",cex.lab=1.5, cex.main=1.5, cex.sub=1.5)
+
+#slice data from 550 to 650
+new_fm = slice(stock, 550:650) %>%
+  filter(days==6)
+
+new_fm2 = slice(stock, 550:650) %>%
+  filter(days==1)
+# points of Saturnday and monday
+ggplot() + 
+  geom_line(aes(x = time,y = open), data = slice(stock, 550:650)) + 
+  geom_point(aes(x=time,y= open), data = new_fm, color = "red") + geom_point(aes(x = time, y= open), data = new_fm2, color = "blue") + ggtitle("Effect of Weekdays") +
+  theme(plot.title = element_text(face = "bold")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.title = element_text(size  = 17)) +
+  xlab("Day") +  theme(axis.text = element_text(size = 10)) +
+  theme(axis.title = element_text(size = 15)) 
+```
+
+
+# 3 Methodology Description
+To model the natural signal in this data, both a parametric model and a differencing approach are used.Both of these models of the signal will be complimented with ARMA models for the remaining noise.
+
+## 3.1 Differencing
+First, as we previously addressed, there are 3 different dominant frequency as we look at the periodigram, 1, 5, and 20. Since it does not make sense to do a differencing with lag of 1 (the frequency is too small), so we will only use lag 5 and 20 in our model. To pursue stationary, we first take a difference with lag of 5 to get rid of weekly oscillation, then we take a lag of 20 to get ride of three-week oscillation, and by taking the two seasonal difference we can also get rid of quadratic trend. Finally, we can take a first order difference in order to get rid of potential cubic trend, as the rate of price increase or decrease.
+
+```{r, echo = FALSE, fig.show="hold", out.width="50%",fig.cap = "Diagnostics for differencing signal model. The left panel shows the fit of differencing model(red). The plot shows the difference value, to be assessed for trend and seasonality", warning=FALSE,message=FALSE,error=FALSE, results='hide'}
+
+log_open1 = log(new_open)
+log_open <- data.frame(open = log_open1,
+                        time = 1:length(log_open1),
+                        date = stock$new_date)
+
+# dominant frequency at 44/913 which implies weekly seasonality; another noticeable frequency is 1.5/913, which suggests a biweekly frequency
+
+diff_1 = diff(log_open$open)
+diff_1_7 = diff(diff_1, lag =5)
+diff_1_7_20 = diff(diff_1_7, lag = 20)
+
+log_open$impliedmodel <- NA
+for (i in 27:nrow(log_open)) {
+ log_open$impliedmodel[i] = mean(diff_1_7_20) + log_open$open[i-5] +   log_open$open[i-10] - log_open$open[i-5-20] + log_open$open[i-1] -  log_open$open[i-5] - log_open$open[i-1-20] + log_open$open[i-1-5-20]
+}
+
+
+plot(log_open$time[27:913], log_open$open[27:913],cex.lab=1.5, cex.main=1.5, cex.sub=1.5, type = "l", xlab = "Day", ylab ="Log prices", main = "prices and Differencing Fit")
+lines(log_open$time[27:913],log_open$impliedmodel[27:913],col='red',lwd=1)
+
+
+plot(log_open$time[27:913],diff_1_7_20, type = "l", ylab = "Difference",xlab = "Day", main = expression(paste(nabla,nabla[5],nabla[20],log(Opens[t]))),cex.lab=1.5, cex.main=1.5, cex.sub=1.5)
+lines(log_open$time[27:913],log_open$impliedmodel[27:913],col='green',lwd=.2)
+
+
+
+```
+
+
+
+```{r, echo = FALSE, fig.show="hold", out.width="50%",fig.cap = "Autocorrelation function (ACF) and partial autocorrelation function (PACF) values for the differ-encing model."}
+#ACF and PACF of Residual plot
+acf(diff_1_7_20, main ="ACF of differencing model")
+pacf(diff_1_7_20, main = "PACF of differencing model")
+
+```
+
+
+
+
+## 3.1.1  Differencing with ARMA(0,8)
+
+First, there are no clear cutoff in the PACF plot, it is more like an exponential decaying trend, so it is clear that q does not equal to 0. As we observe the ACF plot, there is a clear cutoff at lag 8, after which most ACF values are within the white noise C.I. Therefore, an ARMA(0,8) model would be used. Most p-values are above 0.05 according to the Ljung-Box plot in figure 4, so it can be considered to be a good fit.
+
+
+## 3.1.2  Differencing with ARMA(0,1)
+
+First, there are no clear cutoff in the PACF plot, it is more like an exponential decaying trend, so it is clear that q does not equal to 0. As we can observe from the ACF plot, there is high magnitude of auto-correlation at lag 1, then follows with insignificant values. Although there are some high auto-correlation magnitudes at lag 5, 7,8, but they might just happen by chance. Therefore, an ARMA(0,1) model would be used. The first few p-values are above 0.05 according to the Ljung-Box plot in figure 4, it is not the most ideal fit, but it is relatively a good fit compare to other SARIMA models in terms of p-value.
+
+```{r, echo = FALSE, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.show="hold", out.width="50%",fig.cap = "The left panel shows the sarima() function output for the fit of ARMA(0,8) model for differencing model's residuals. The right panel shows the sarima() function output for the fit of ARMA(0,1) model for differencing model's residuals. We will use the Ljung-Box plot to exam the fitness of our ARMA model."}
+noise_model1 = sarima(diff_1_7_20,p=0,d=0,q=0,S=0,P=0,D=0,Q=0)
+noise_model2 = sarima(diff_1_7_20,p=0,d=0,q=0,S=1,P=0,D=0,Q=0)
+
+
+noise_model1$AIC
+noise_model2$AIC
+```
+
+# 3.2 Parametric Signal Model
+
+For Parametric model, we want to create sinusoids and indicator variables to capture the seasonality, also a parametric curve to capture the trend. First, we still apply the log VST to stabilize the variance. In regard to trend, I am using a fourth degree polynomial equation to capture the feature that price curve has the trend of increasing to decreasing to increasing and then to decreasing again. To capture the weekly seasonality, I use indicator variables for each day of th week. To capture the semi-weekly and Three-week seasonality, sinusoids will be employed. 
+
+Figure 5 presents the fit as well as the residuals, which appear reasonably stationary.
+
+
+
+
+```{r, echo = FALSE, fig.show="hold", out.width="50%",fig.cap = "The parametric signal model. The left panel shows this model’s fitted values in red, plotted new open prices data in black. The right panel shows the residuals of this model.",warning=FALSE,message=FALSE,error=FALSE, results='hide'}
+#model 2 (Parametric Model)
+
+
+
+
+model_3 = lm(log_open$open ~ time + I(time^2) + I(time^3) + I(time^4) + cos(2*pi*time*87/n) + sin(2*pi*time*87/n) + cos(2*pi*time*2/n)+ sin(2*pi*time*2/n)
+ + cos(2*pi*time*3/n) + sin(2*pi*time*3/n) + I(factor(time%%7)), data = log_open)
+
+
+plot(log_open$date, log_open$open, type = "l", main = "Parametric Signal Model", xlab = "Month", ylab = "Log prices",cex.lab=1.5, cex.main=1.5, cex.sub=1.5)
+lines(log_open$date, model_3$fitted.values, col = "red")
+
+plot(log_open$date, model_3$residuals, type = "l", main = "Residuals", ylab = "Residuals", xlab = "Month",cex.lab=1.5, cex.main=1.5, cex.sub=1.5)
+
+
+
+
+```
+
+
+```{r,echo = FALSE, fig.show="hold", out.width="50%",fig.cap = "Autocorrelation function (ACF) and partial autocorrelation function (PACF) values for the parametric model."}
+#ACF and PACF
+acf(model_3$residuals, main ="ACF of parametric model")
+pacf(model_3$residuals, main = "PACF of parametric model")
+```
+
+
+
+## 3.2.1  Parametric Signal with ARMA(1,0)
+
+The ACF plot has a exponential decaying trend which suggests non-zero p value, and PACF plot suggests a clear cut-off at lag 1, which indicates a zero q value, and a p value of 1. Hence, an ARMA(1,0) model would be a reasonable fit for the noise. According to the Ljung-Box plot in figure 7, all p-values above 0.05, so it can be considered as a good fit.
+
+
+## 3.2.2  Parametric Signal with ARMA(2,1)
+
+This second noise model will be chosen with the R function, auto.sarima(), which generates a result of ARMA(2,1). According to the Ljung-Box plot in figure 7, all p-values above 0.05, so it can be considered as a good fit.
+
+
+```{r,echo = FALSE, warning=FALSE,message=FALSE,error=FALSE, results='hide',fig.show="hold", out.width="50%", fig.cap = "The left panel shows the sarima() function output for the fit of ARMA(1,0) model for parametric model's residuals. The rightanel shows the sarima() function output for the fit of ARMA(2,1) model for parametric model's residuals. We will use the Ljung-Box plot to examine the fitness of our ARMA model."}
+
+noise_model3 = sarima(model_3$residuals,p=1,d=0,q=0,S=0,P=0,D=0,Q=0)
+noise_model4 = sarima(model_3$residuals,p=2,d=0,q=1,S=0,P=0,D=0,Q=0)
+
+noise_model3$AIC
+noise_model4$AIC
+
+```
+
+
+
+
+# 4 Model Selection and Proposed outcomes
+
+These four model options are compared through time series cross validation. The non-over lapping testing sets roll through the data until 12/17/2021, in 10 day segments. The training sets consist of all data that occur before the appropriate testing set. The models’ forecasting performances will be compared through root-mean-square prediction error (RMSPE). Although the RMSPE is in term of log prices, but it still provides the best selection. The model with the lowest RMSPE will be chosen as the model for prediction of the stock price for the next 10 days (weekends included). Table 1 shows that the differencing model with ARMA(0,1) has the lowest cross-validated forecasterror.Thus the differencing model with ARMA(0,1) is the chosen forecasting model.
+
+
+
+
+```{r, include="false"}
+#stock[nrow(stock),]
+
+sum_squared_error <- c(model1.1=0, model1.2=0, model2.1=0, model2.2=0)
+starting_day <- 27 # the real starting day is 202
+ending_dat <- 913
+
+
+for (i in 1:10){
+  train_set <- log_open[1:(starting_day + i*10),]
+  test_set <- log_open[((starting_day + i*10 +1) : (starting_day + i*10 + 10)),]
+  N = nrow(train_set)
+  # signal 1 forecasting
+  signal1 <- lm(train_set$open ~ time + I(time^2) + I(time^3) + I(time^4) + I(factor(time%%7))+
+                 cos(2*pi*time*87/n) + sin(2*pi*time*87/n) +
+                 cos(2*pi*time*2/n) + sin(2*pi*time*2/n) +
+                 cos(2*pi*time*3/n) + sin(2*pi*time*3/n), data = train_set)
+  forecast2 = predict(signal1,test_set)
+  noise_pred1.1 = sarima.for(signal1$residuals, n.ahead=10, p=1,d=0,q=0,S=0,P=0)$pred
+  noise_pred1.2 = sarima.for(signal1$residuals, n.ahead=10, p=2,d=0,q=1,S=0,P=0)$pred
+  forecast_model11 <- forecast2 + noise_pred1.1
+  forecast_model12 <- forecast2 + noise_pred1.2
+  sum_squared_error[1] = sum_squared_error[1] + sum((forecast_model11 - test_set$open)^2)
+  sum_squared_error[2] = sum_squared_error[2] + sum((forecast_model12 - test_set$open)^2)
+
+  
+  # model 2 forecasting
+  dif <- diff(diff(diff(train_set$open),lag = 5),lag = 20)
+  noise_pred2.1 <- sarima.for(dif,n.ahead=10,p=0,d=0,q=1,P=0,D=0,Q=0,S=0)$pred
+  noise_pred2.2 <- sarima.for(dif,n.ahead=10,p=0,d=0,q=8,P=0,D=0,Q=0,S=0)$pred
+  forecast_model21 <- numeric(10)
+  forecast_model22 <- numeric(10)
+  for (i in 1:5) {
+    #forecasting for 2.1
+    forecast_model21[i] = noise_pred2.1[i] + 
+      train_set$open[length(train_set$open)+i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-5-20] + train_set$open[length(train_set$open)+i-1] - train_set$open[length(train_set$open)+i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+    # forecasting for 2.2
+    forecast_model22[i] = noise_pred2.2[i] + train_set$open[length(train_set$open)+i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-5-20] + train_set$open[length(train_set$open)+i-1] - train_set$open[length(train_set$open)+i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+  }
+  
+  for (i in 6:8) {
+    forecast_model21[i] = noise_pred2.1[i] + forecast_model21[i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-5-20] + forecast_model21[i-1] - train_set$open[length(train_set$open)+i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+    # 2.2
+     forecast_model22[i] = noise_pred2.2[i] + forecast_model22[i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-5-20] + forecast_model22[i-1] - train_set$open[length(train_set$open)+i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+  }
+  
+  for (i in 9:10){
+     forecast_model21[i] = noise_pred2.1[i] + forecast_model21[i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-5-20] + forecast_model21[i-1] - forecast_model21[i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+     # 2.2
+     forecast_model22[i] = noise_pred2.2[i] + forecast_model22[i-5]
+                          + train_set$open[length(train_set$open)+i-20] -          train_set$open[length(train_set$open)+i-7-20] + forecast_model22[i-1] - forecast_model22[i-1-5] - train_set$open[length(train_set$open)+i-1-20] + train_set$open[length(train_set$open)+i-1-5-20]
+  }
+  print(i)
+  print(sum((forecast_model21 - test_set$open)^2))
+  print(sum((forecast_model22 - test_set$open)^2))
+  sum_squared_error[3] = sum_squared_error[3] + sum((forecast_model21 - test_set$open)^2)
+  sum_squared_error[4] = sum_squared_error[4] + sum((forecast_model22 - test_set$open)^2)
+  
+}
+```
+
+
+
+
+
+
+
+```{r rmsetable, echo= FALSE}
+rmse = sqrt(sum_squared_error/100)
+dim(rmse) = c(4,1)
+colnames(rmse) = "RMSPE"
+rownames(rmse) = c("Parametric Model + ARMA(1,0)",
+           "Parametric Model + ARMA(2,1)",
+           "Three-week Differencing + Weekly Differencing + First order Differecing ARMA(0,1)",
+           "Three-week Differencing + Weekly Differencing + First order Differecing ARMA(0,8)")
+
+knitr::kable(rmse,caption = "Cross-validated out-of-sample root mean squared prediction error for the four models under consideration.")
+
+
+
+```
+
+# 5 Results and Relevance of the Project
+## 5.1 Results
+A Three-week differencing + Weekly differencing + First order differencing model with ARMA(0,1) noise will be used to forecast. Let $Y_t$ represents the new prices at time t with addictive noise term $X_t$. $X_t$ is a additive noise term, which is a stationary process defined by ARMA(0,1). $W_t$ is defined as white noise with variance $\sigma^2_W$. In the end, we need to apply exp() function to transform $\log(Y_{t})$ into $Y_t$ which is the forecasting that we want.
+
+
+
+\begin{equation}
+\begin{aligned}
+\log \left(Y_{t}\right)=& \log \left(Y_{t-5}\right)+\log \left(Y_{t-20}\right)-\log \left(Y_{t-25}\right) \\
+&+\log \left(Y_{t-1}\right)-\log \left(Y_{t-6}\right)-\log \left(Y_{t-22}\right)+\log \left(Y_{t-26}\right) \\
+&+X_{t}
+\end{aligned}
+\end{equation}
+
+\begin{equation}
+X_{t}=W_{t}+\theta W_{t-1}
+\end{equation}
+
+\begin{equation}
+Y_{t}=\exp \left(\log \left(Y_{t}\right)\right)
+\end{equation}
+
+
+
+
+```{r,echo= FALSE, fig.show= "hide"}
+
+  
+
+
+  dif <- diff(diff(diff(log_open$open),lag = 5),lag = 20)
+  noise_pred2.1 <- sarima.for(dif,n.ahead=10,p=0,d=0,q=1,P=0,D=0,Q=0,S=0)$pred
+  noise_pred2.2 <- sarima.for(dif,n.ahead=10,p=0,d=0,q=8,P=0,D=0,Q=0,S=0)$pred
+  forecast_model21 <- c()
+  forecast_model22 <- c()
+  for (i in 1:5) {
+    #forecasting for 2.1
+    forecast_model21[i] = noise_pred2.1[i] + log_open$open[length(log_open$open)+i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + log_open$open[length(log_open$open)+i-1] - log_open$open[length(log_open$open)+i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+    # forecasting for 2.2
+    forecast_model22[i] = noise_pred2.2[i] + log_open$open[length(log_open$open)+i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + log_open$open[length(log_open$open)+i-1] - log_open$open[length(log_open$open)+i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+  }
+  
+  for (i in 6:8) {
+    forecast_model21[i] = noise_pred2.1[i] + forecast_model21[i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + forecast_model21[i-1] - log_open$open[length(log_open$open)+i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+    # 2.2
+     forecast_model22[i] = noise_pred2.2[i] + forecast_model22[i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + forecast_model22[i-1] - log_open$open[length(log_open$open)+i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+  }
+  
+  for (i in 9:10){
+     forecast_model21[i] = noise_pred2.1[i] + forecast_model21[i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + forecast_model21[i-1] - forecast_model21[i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+     # 2.2
+     forecast_model22[i] = noise_pred2.2[i] + forecast_model22[i-5]
+                          + log_open$open[length(log_open$open)+i-20] -          log_open$open[length(log_open$open)+i-5-20] + forecast_model22[i-1] - forecast_model22[i-1-5] - log_open$open[length(log_open$open)+i-1-20] + log_open$open[length(log_open$open)+i-1-5-20]
+  }
+
+
+
+  
+```
+\newpage
+## 5.2 Prediction
+Figure 10 shows the forecast value for stock price 12/18/2021 to 12/28/2021.
+
+```{r, echo= FALSE,fig.show="hold", fig.align="center", out.width="50%",fig.cap = "Forecasts of open prices. The x-axis is time in months. The black line is the recent historical new open prices data. The red points are the forecasts for 12/18/2021 to 12/28/2021."}
+prediction_tab = data.frame(open = exp(forecast_model21),
+                            time = (nrow(log_open)+1):(nrow(log_open) + 10),
+                            new_date = stock$new_date[nrow(stock)] + 1:10)
+
+new_df=stock[,c("open","time","new_date")]
+#combined_tab <- rbind(open[,c("open","time","new_date")][27:913,], prediction_tab)
+combined_tab = rbind(new_df,prediction_tab)
+
+
+ggplot() + 
+  geom_line(aes(x = new_date,y = open), data = slice(combined_tab,813:923) , col = "red") +
+  geom_line(aes(x = new_date,y = open), data = slice(stock, 813:913)) +
+  geom_point(aes(x = new_date, y = open), data = prediction_tab, col = "red") +
+  xlab("Date") + ylab("open") + ggtitle("open Forecasts") +
+  theme(plot.title = element_text(face = "bold")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(plot.title = element_text(size  = 17)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(axis.title = element_text(size = 13)) 
+
+
+```
+## 5.3 Relevance
+In this project, we successfully give a prediction on the next ten days stock price change. The relevance is that, after I got familar with time series algorithms, I can then employed it on multiple stock markets and analyze their difference in prices change within a time frame. In addition, the fourier transformation and signal processing can also be applied on other markets, such as, crypto and ETFs.
+
+# 6 Blind spots and Ethical Issues
+There are lots of blind spots. Since companies are different if they have they are registered in different areas, we cannot assume both branches are the same. In addition, there are lots of companies that are duel-listed; I need to traverse lots of companies to give a statistically significant conclusion. What’s more, analyzing markets only in China, Hong Kong, and the United States can be a biased sample, I need to be very careful on drawing the association, correlation, causal inference, and conclusion.
+
+# 7 Acknowledgement and Reference
+I acknowledge Professor Eric Van Dusen's help on guiding me through completing the project step by step from data pre-processing to the final model and ethical analysis. I also gained example code on time series analysis from stat 153 class projects and textbooks.
+
+
+
